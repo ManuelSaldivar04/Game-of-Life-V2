@@ -1,12 +1,17 @@
 //===== GLOBAL VARIABLES ======
 let population; //represent the population in the generation
 let generation = 0;//represent the current generation
+let LiveNeighbours;
 let grid;//the current generation grid representation
 let nextGrid; //the next generation grid representation
-const SQUARE_SIZE = 10;
+const SQUARE_SIZE = 8;
 let cols,rows;
-let canPress = true;//FLAG toallow user to press mouse 
+let state;
+let canPress = true;//FLAG to allow user to press mouse 
 let intervalID = null;
+let timeoutID = null;
+const duration = 120000; //max duration to run the game of life before ending (2 minutes)
+let gridGraphics; //seperate graphics buffer for static grid
 //the eight neighbours of any given cell (horizontal,vertical,diagonal)
 const NEIGHBOURS = [ 
     [-1,-1],[-1,0],[-1,1],
@@ -14,6 +19,8 @@ const NEIGHBOURS = [
     [1,-1],[1,0],[1,1]
 ];
 const LiveCells = new Set(); //keep track of live cells only
+const DeadNeighbourCells = new Set(); //keep track of potential dead neighbour cells to living cells
+
 //==== FUNCTIONS ====
 
 //create a 2D array
@@ -35,36 +42,77 @@ function setup() {
     rows = height / SQUARE_SIZE;// rows = 400 / SQUARE_SIZE
     grid = make2DArray(cols, rows);
     nextGrid = make2DArray(cols, rows);
+
+    //create static grid lines buffer
+    gridGraphics = createGraphics(width,height);
+    drawGridLines(gridGraphics);
+
     drawGrid();
     population = countPopulation();
     updatePopulationDisplay(); 
 }
+
+function drawGridLines(buffer){
+    buffer.background(0);
+    buffer.stroke(255);
+    buffer.strokeWeight(1);
+
+    //draw vertical lines
+    for(let x = 0; x <= width; x += SQUARE_SIZE){
+        buffer.line(x,0,x,height);
+    }
+
+    //draw horizontal lines
+    for(let y = 0; y <= height; y += SQUARE_SIZE){
+        buffer.line(0,y,width,y);
+    }
+}
+
 //function to redraw the grid
 function drawGrid(){
-    background(0);
-    for(let i = 0;i< cols;i++){
-        for(let j = 0;j< rows;j++){
-            stroke(255);
-            fill(grid[i][j]*255);
-            let x = i * SQUARE_SIZE;
-            let y = j * SQUARE_SIZE;
-            square(x,y,SQUARE_SIZE);
-        }
-    }
+   // background(0);
+   image(gridGraphics,0,0);
+
+    //only draw live cells
+    stroke(255);
+    fill(255);
+
+    LiveCells.forEach(key =>{
+        const [i,j]= JSON.parse(key);
+        const x = i * SQUARE_SIZE;
+        const y = j * SQUARE_SIZE;
+        square(x,y,SQUARE_SIZE);
+    });
+}
+
+function drawResetGrid(){
+    image(gridGraphics,0,0);
+    //reset all the current live cells to size 0
+    LiveCells.clear();
 }
 //mouse clicked function
 function mousePressed(){
     if(canPress){
-        let row = floor(mouseX / SQUARE_SIZE);
-        let col = floor(mouseY / SQUARE_SIZE);
-        grid[row][col] = grid[row][col] === 0 ? 1 : 0;
+        let col = floor(mouseX / SQUARE_SIZE); //used to be row
+        let row = floor(mouseY / SQUARE_SIZE);//used to be col
+        let key = JSON.stringify([col,row]);
+
+        if(grid[col][row] === 0){
+            grid[col][row] = 1;
+            //add to set
+            if(!LiveCells.has(key)){
+                LiveCells.add(key);
+                console.log("Added to Set: Row: "+row+" col: "+col);
+
+            }
+        }else{
+            grid[col][row] = 0;
+            //remove from set
+            LiveCells.delete(key);
+            console.log("Removed from Set: Row: "+row+" col: "+col);
+        }
         population = countPopulation();
         updatePopulationDisplay();
-        if(grid[row][col] === 1)
-            console.log("Row: "+ row +", Col: "+col);
-        if(!(LiveCells.has(row,col)))//only checking the row but not the row and col
-            console.log("Added to Set: Row: "+row+" col: "+col);
-            LiveCells.add(row,col); 
         //redraw grid
         drawGrid();
     } 
@@ -74,56 +122,92 @@ function mousePressed(){
 function startGame(){
     //only start if not already running
     if(intervalID === null){
-        intervalID = setInterval(
+        intervalID = setInterval( //replace for setInterval
     function draw(){
+        //console.log("Size of the LiveCells set is: "+LiveCells.size);
         drawGrid();
         disableMousePress();//cannot press mouse
-        //let nextGrid = make2DArray(cols, rows);
         // Iterate through the grid and move each cell independently
-        for (let i = 0; i < cols; i++) {
-            for (let j = 0; j < rows; j++) {
-                let state = grid[i][j]; // State of the current cell
-                let LiveNeighbours = NumLiveNeighbours(grid,i,j);
-                if (state === 1) {
-                    //Conways First Rule of Game of Life
-                    if(LiveNeighbours < 2){
-                        nextGrid[i][j] = 0;//Dies
-                        //population--;
-                    }
-                    //conways Second Rule of Game of Life
-                    else if(LiveNeighbours <= 3){
-                        nextGrid[i][j] = 1;//Lives
-                        //population++;
-                    
-                    }
-                    //Conways Third Rule of Game of Life
-                    else{
-                        nextGrid[i][j] = 0;//dies if more than three live neighbours
-                        //population--;
-                    }
-                }else{ //state === 0
-                    //Conways Fourth Rule of Game of Life
-                    if(LiveNeighbours == 3){
-                        nextGrid[i][j] = 1;//any cell with exactly three live neighbours live's
-                        //population++;
-                    }
+        const CurrentLiveCells = getCurrentLiveCells();
+
+        const cellsToCheck = new Set();
+
+        CurrentLiveCells.forEach(([col,row]) => {
+            cellsToCheck.add(JSON.stringify([col,row]));
+
+            //add all 8 neighbours
+            for(let [dx,dy] of NEIGHBOURS){
+                let [nx,ny] = get_toroidal_coordinates(col + dx, row + dy, cols, rows);
+                cellsToCheck.add(JSON.stringify([nx,ny]));
+            }
+        });
+        //calculate new generation
+        const nextLiveCells = new Set();
+
+        cellsToCheck.forEach(key =>{
+            const [x,y] = JSON.parse(key);
+            const isAlive = grid[x][y] === 1;
+            const LiveNeighbours = NumLiveNeighbours(grid,x,y);
+
+            if(isAlive){
+                //conways First and Third rule of Game of Life
+                if(LiveNeighbours < 2 || LiveNeighbours > 3){
+                    nextGrid[x][y] = 0;//dies
+                }
+                //conways Second Rule of Game of Life
+                else if(LiveNeighbours === 2 || LiveNeighbours === 3){
+                    nextGrid[x][y] = 1;//lives
+                    nextLiveCells.add(key);
+                }
+            }else{
+                if(LiveNeighbours === 3){
+                    nextGrid[x][y] = 1;//lives
+                    nextLiveCells.add(key);
                 }
             }
-        }
-        
+        });
         // Update grids for next frame
+        const temp = grid; //NEW
         grid = nextGrid;
+        nextGrid = temp; //NEW
+
+       for(let i = 0;i < cols;i++){
+            for(let j = 0; j < rows;j++){
+                nextGrid[i][j] = 0;
+            }
+        }
+
+        LiveCells.clear();//NEW
+        nextLiveCells.forEach(key => LiveCells.add(key));
+
+        //clearInterval(intervalID); //needed
+
         population = countPopulation();
         generation++;
         updateGenerationDisplay();
         updatePopulationDisplay();
-        },100)
+        },100);
+
+        //set a timeout to stop the game after duration
+        timeoutID = setTimeout(() =>{
+            clearInterval(intervalID);
+            intervalID = null;
+            resetGame();
+            console.log(`Game of Life ended after ${duration/1000} seconds`);
+        },duration);
     }
 }
+
 //pause the game
 function pauseGame(){
     clearInterval(intervalID);
     intervalID = null;
+
+    //clear the timeout if it exists
+    if(timeoutID != null){
+        clearTimeout(timeoutID);
+        timeoutID = null;
+    }
     disableMousePress();//cannot use mouse
 }
 //reset the game
@@ -139,19 +223,25 @@ function resetGame(){
     for(let i = 0;i < cols;i++){
         for(let j = 0; j < rows;j++){
             grid[i][j] = 0;
+            nextGrid[i][j] = 0;
         }
     }
-     drawGrid();
+    //clear the timeout if it exists
+    if(timeoutID != null){
+        clearTimeout(timeoutID);
+        timeoutID = null;
+    }
+    drawResetGrid();
 }
+
 //function to count the population of the generation
 function countPopulation(){
-    let count = 0;
-    for(let i = 0;i < cols;i++){
-        for(let j = 0;j < rows;j++){
-            if(grid[i][j] === 1)count++;
-        }
-    }
-    return count;
+    return LiveCells.size;
+}
+
+//function to return the current live cells
+function getCurrentLiveCells(){
+    return Array.from(LiveCells).map(str => JSON.parse(str));
 }
 
 //function to anable the mouse pressing on the grid
